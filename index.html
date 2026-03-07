@@ -53,6 +53,1051 @@
     tr:last-child td{ border-bottom:0; }
 
     .num{ font-variant-numeric: tabular-nums; }
+    .leader{ background:var(--yellow); color:#0b1220; font-weight:800; border-radius:8px; }
+
+    .tabBar{ display:flex; gap:8px; overflow:auto; padding:8px; border:1px solid var(--line); border-radius:12px; background:var(--dark); }
+    .tab{ flex:0 0 auto; display:inline-flex; align-items:center; gap:8px; padding:8px 10px; border-radius:999px; border:1px solid rgba(34,50,85,.8); background:#0d1833; color:var(--text); font-size:13px; cursor:pointer; user-select:none; }
+    .tab.active{ border-color:rgba(94,234,212,.7); box-shadow: 0 0 0 3px rgba(94,234,212,.14); }
+    .tab .mini{ font-size:11px; color:var(--muted); }
+
+    .toast{ position:fixed; left:16px; right:16px; bottom:16px; margin:0 auto; max-width:760px; display:none; padding:12px 12px; border-radius:12px; background:rgba(17,27,46,.96); border:1px solid rgba(34,50,85,.85); }
+    .toastRow{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+    .toastTitle{ font-weight:800; }
+    .toastSub{ color:var(--muted); font-size:12px; margin-top:2px; }
+
+    .confetti{ position:fixed; inset:0; pointer-events:none; overflow:hidden; display:none; }
+    .confetti i{ position:absolute; top:-12px; width:10px; height:14px; opacity:.95; border-radius:2px; animation: fall 1.3s linear forwards; }
+    @keyframes fall{ to{ transform: translateY(110vh) rotate(520deg); opacity:1; } }
+
+    .btnGroup{ display:flex; gap:10px; flex-wrap:wrap; }
+  </style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>9 Points Golf Scorer (3 players, multi-game)</h1>
+    <div class="sub">
+      Multi-game tabs, CSV import/export for this game or all games.
+      <span class="badge ok">Offline + persistent</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="row">
+    <div class="card" style="flex:1 1 580px;">
+      <h2>Setup</h2>
+      <div class="row">
+        <div>
+          <label>Games</label>
+          <input id="gameCount" type="number" min="1" max="20" value="3" />
+        </div>
+        <div>
+          <label>Holes per game</label>
+          <input id="holeCount" type="number" min="1" max="36" value="18" />
+        </div>
+        <div>
+          <button class="primary" id="apply">Apply</button>
+        </div>
+        <div>
+          <button id="addGame">Add game</button>
+        </div>
+        <div>
+          <button id="addHole">Add hole</button>
+        </div>
+      </div>
+
+      <div style="height:10px;"></div>
+      <div class="row" id="nameRow"></div>
+
+      <div style="height:10px;"></div>
+      <div class="btnGroup">
+        <button id="exportGame">Export CSV (this game)</button>
+        <button id="exportAll">Export CSV (all games)</button>
+        <button id="importGame">Import CSV (this game)</button>
+        <button id="importAll">Import CSV (all games)</button>
+        <button id="resetGame">Reset this game</button>
+        <button class="danger" id="resetAll">Reset all games</button>
+      </div>
+
+      <div style="height:10px;"></div>
+      <div class="small">Scoring: normal is 5 / 3 / 1 with ties splitting. Special rule: if one player is 2 strokes better than both others, they get 9 points for the hole.</div>
+    </div>
+
+    <div class="card" style="flex:1 1 460px;">
+      <h2>Totals</h2>
+      <div class="small" style="margin-bottom:6px;">Current game totals (completed holes only)</div>
+      <div class="totals" id="totalsGame"></div>
+      <div style="height:10px;"></div>
+      <div class="small" style="margin-bottom:6px;">All games accumulated totals (completed holes only)</div>
+      <div class="totals" id="totalsOverall"></div>
+      <div style="height:10px;"></div>
+      <div class="small">Overall winner is highest accumulated points.</div>
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+  <div class="card">
+    <h2>Games</h2>
+    <div class="tabBar" id="tabs"></div>
+  </div>
+
+  <div style="height:14px;"></div>
+  <div class="card">
+    <h2 id="scorecardTitle">Scorecard</h2>
+    <div class="holes" id="scorecard"></div>
+  </div>
+</div>
+
+<input type="file" id="importFile" accept=".csv,text/csv" style="display:none" />
+
+<div class="confetti" id="confetti"></div>
+<div class="toast" id="toast">
+  <div class="toastRow">
+    <div>
+      <div class="toastTitle" id="toastTitle"></div>
+      <div class="toastSub" id="toastSub"></div>
+    </div>
+    <button id="toastClose" aria-label="Close message">Close</button>
+  </div>
+</div>
+
+<script>
+  const POINTS = [5, 3, 1];
+
+  // Bumped key to force a clean start (clears previous inputs and names)
+  const STORAGE_KEY = 'ninepoints_golf_v5_clean';
+
+  const DEFAULT_NAMES = ["player 1", "player 2", "player 3"];
+
+  const state = {
+    players: 3,
+    games: 3,
+    holes: 18,
+    activeGame: 0,
+    names: [...DEFAULT_NAMES],
+    strokes: [],
+    celebrated: { games: {}, overall: false }
+  };
+
+  const el = (id)=>document.getElementById(id);
+  const advanceTimers = new Map();
+  let pendingImportMode = null; // 'game' | 'all'
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  }
+
+  function safeParse(json){ try { return JSON.parse(json); } catch { return null; } }
+
+  function saveState(){
+    const payload = { games: state.games, holes: state.holes, activeGame: state.activeGame, names: state.names, strokes: state.strokes, celebrated: state.celebrated };
+    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(payload)); }catch(e){}
+  }
+
+  function coerceStrokesArray(dataStrokes, games, holes){
+    const out = [];
+    for(let g=0; g<games; g++){
+      const game = [];
+      for(let h=0; h<holes; h++){
+        const row = (dataStrokes && dataStrokes[g] && dataStrokes[g][h]) ? dataStrokes[g][h] : [null,null,null];
+        game.push([
+          row[0] === null || row[0] === '' ? null : Number(row[0]),
+          row[1] === null || row[1] === '' ? null : Number(row[1]),
+          row[2] === null || row[2] === '' ? null : Number(row[2])
+        ]);
+        for(let p=0;p<3;p++) if(Number.isNaN(game[h][p])) game[h][p] = null;
+      }
+      out.push(game);
+    }
+    return out;
+  }
+
+  function loadState(){
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if(!raw) return false;
+    const data = safeParse(raw);
+    if(!data) return false;
+
+    const games = Number(data.games);
+    const holes = Number(data.holes);
+    const activeGame = Number(data.activeGame);
+    const names = Array.isArray(data.names) ? data.names.slice(0,3) : null;
+
+    if(!Number.isFinite(games) || games < 1 || games > 20) return false;
+    if(!Number.isFinite(holes) || holes < 1 || holes > 36) return false;
+    if(!names || names.length != 3) return false;
+
+    state.games = games;
+    state.holes = holes;
+    state.activeGame = (Number.isFinite(activeGame) && activeGame >= 0 && activeGame < games) ? activeGame : 0;
+    state.names = names.map((n,i)=> (String(n || '').trim() || DEFAULT_NAMES[i]));
+    state.strokes = coerceStrokesArray(data.strokes, state.games, state.holes);
+
+    const celeb = data.celebrated && typeof data.celebrated === 'object' ? data.celebrated : null;
+    state.celebrated = { games: (celeb && celeb.games && typeof celeb.games === 'object') ? celeb.games : {}, overall: !!(celeb && celeb.overall) };
+    return true;
+  }
+
+  function initStrokes(){
+    state.strokes = [];
+    for(let g=0; g<state.games; g++){
+      const game = [];
+      for(let h=0; h<state.holes; h++) game.push([null,null,null]);
+      state.strokes.push(game);
+    }
+  }
+
+  function setGamesAndHoles(newGames, newHoles){
+    const games = Math.max(1, Math.min(20, Number(newGames || 3)));
+    const holes = Math.max(1, Math.min(36, Number(newHoles || 18)));
+
+    const oldGames = state.games;
+    const oldHoles = state.holes;
+
+    state.games = games;
+    state.holes = holes;
+
+    const next = [];
+    for(let g=0; g<games; g++){
+      const game = [];
+      for(let h=0; h<holes; h++){
+        const prev = (state.strokes[g] && state.strokes[g][h]) ? state.strokes[g][h] : [null,null,null];
+        game.push(prev.slice(0,3));
+      }
+      next.push(game);
+    }
+    state.strokes = next;
+
+    if(state.activeGame >= games) state.activeGame = games - 1;
+
+    if(oldGames !== games || oldHoles !== holes) saveState();
+  }
+
+  function buildNames(){
+    const row = el('nameRow');
+    row.innerHTML = '';
+    for(let i=0;i<3;i++){
+      const wrap = document.createElement('div');
+      const lab = document.createElement('label');
+      lab.textContent = 'Name ' + (i+1);
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.value = state.names[i];
+      inp.addEventListener('input', ()=>{
+        state.names[i] = (inp.value || '').trim() || DEFAULT_NAMES[i];
+        saveState();
+        render();
+      });
+      wrap.appendChild(lab);
+      wrap.appendChild(inp);
+      row.appendChild(wrap);
+    }
+  }
+
+  function computeHolePoints(strokes){
+    if(strokes.some(v => v === null || v === '' || Number.isNaN(v))) return null;
+    const s = strokes.map(Number);
+
+    const minVal = Math.min(...s);
+    const minIdxs = s.map((v,i)=>({v,i})).filter(o => o.v === minVal).map(o => o.i);
+    if(minIdxs.length === 1){
+      const winner = minIdxs[0];
+      const others = s.filter((_,i)=>i!==winner);
+      if(others.every(v => v - minVal >= 2)){
+        const out = [0,0,0];
+        out[winner] = 9;
+        return out;
+      }
+    }
+
+    const indexed = s.map((v,i)=>({s:v, i})).sort((a,b)=>a.s-b.s);
+    const holePts = [0,0,0];
+
+    let k = 0;
+    while(k < 3){
+      let j = k;
+      while(j+1 < 3 && indexed[j+1].s === indexed[k].s) j++;
+      const sum = POINTS.slice(k, j+1).reduce((a,b)=>a+b,0);
+      const each = sum / (j-k+1);
+      for(let t=k;t<=j;t++) holePts[indexed[t].i] = each;
+      k = j+1;
+    }
+    return holePts;
+  }
+
+  function fmt(v, decimals=1){
+    if(v === null || v === undefined) return '';
+    if(Number.isNaN(v)) return '';
+    return Number(v).toFixed(decimals);
+  }
+
+  function gameTotals(gameIdx){
+    const totalStrokes = [0,0,0];
+    const totalPoints  = [0,0,0];
+    let completedHoles = 0;
+
+    for(let h=0; h<state.holes; h++){
+      const st = state.strokes[gameIdx][h];
+      const pts = computeHolePoints(st);
+      if(!pts) continue;
+      completedHoles++;
+      for(let p=0;p<3;p++){
+        totalStrokes[p] += Number(st[p]);
+        totalPoints[p]  += pts[p];
+      }
+    }
+
+    return { totalStrokes, totalPoints, completedHoles, complete: completedHoles === state.holes };
+  }
+
+  function overallTotals(){
+    const totalStrokes = [0,0,0];
+    const totalPoints  = [0,0,0];
+    let completedGames = 0;
+
+    for(let g=0; g<state.games; g++){
+      const t = gameTotals(g);
+      if(t.complete) completedGames++;
+      for(let p=0;p<3;p++){
+        totalStrokes[p] += t.totalStrokes[p];
+        totalPoints[p]  += t.totalPoints[p];
+      }
+    }
+
+    return { totalStrokes, totalPoints, completedGames, allComplete: completedGames === state.games };
+  }
+
+  function winnerFromPoints(pointsArr){
+    const max = Math.max(...pointsArr);
+    const idxs = pointsArr.map((v,i)=>({v,i})).filter(o=>o.v === max).map(o=>o.i);
+    return { max, idxs, isTie: idxs.length > 1 };
+  }
+
+  function showToast(title, sub){
+    el('toastTitle').textContent = title;
+    el('toastSub').textContent = sub || '';
+    el('toast').style.display = 'block';
+  }
+
+  function hideToast(){ el('toast').style.display = 'none'; }
+
+  function burstConfetti(){
+    const c = el('confetti');
+    c.innerHTML = '';
+    c.style.display = 'block';
+    const colors = ['#5eead4','#fbbf24','#34d399','#60a5fa','#fb7185','#a78bfa'];
+    const count = 70;
+    for(let i=0;i<count;i++){
+      const piece = document.createElement('i');
+      piece.style.left = (Math.random() * 100) + 'vw';
+      piece.style.background = colors[i % colors.length];
+      piece.style.width = (6 + Math.random() * 8) + 'px';
+      piece.style.height = (8 + Math.random() * 14) + 'px';
+      piece.style.animationDelay = (Math.random() * 0.15) + 's';
+      piece.style.animationDuration = (0.95 + Math.random() * 0.9) + 's';
+      piece.style.transform = `rotate(${Math.random()*360}deg)`;
+      c.appendChild(piece);
+    }
+    setTimeout(()=>{ c.style.display = 'none'; }, 1700);
+  }
+
+  function maybeCelebrate(){
+    for(let g=0; g<state.games; g++){
+      const t = gameTotals(g);
+      if(!t.complete) continue;
+      if(state.celebrated.games[String(g)]) continue;
+
+      const w = winnerFromPoints(t.totalPoints);
+      const gameLabel = `Game ${g+1}`;
+      state.celebrated.games[String(g)] = true;
+      state.celebrated.overall = false;
+      saveState();
+
+      if(w.isTie){
+        showToast(`\uD83C\uDF89 ${gameLabel} complete`, 'Tie for top points');
+        burstConfetti();
+        return;
+      }
+
+      showToast(`\uD83C\uDF89 ${gameLabel} winner`, `${state.names[w.idxs[0]]} wins this game`);
+      burstConfetti();
+      return;
+    }
+
+    const o = overallTotals();
+    if(o.allComplete && !state.celebrated.overall){
+      const w = winnerFromPoints(o.totalPoints);
+      state.celebrated.overall = true;
+      saveState();
+      if(w.isTie){
+        showToast('\uD83C\uDFC6 Overall winner', 'Tie for top accumulated points');
+        burstConfetti();
+        return;
+      }
+      showToast('\uD83C\uDFC6 Overall winner', `${state.names[w.idxs[0]]} wins across all games`);
+      burstConfetti();
+    }
+  }
+
+  function renderTabs(){
+    const tabs = el('tabs');
+    tabs.innerHTML = '';
+
+    for(let g=0; g<state.games; g++){
+      const t = gameTotals(g);
+      const w = winnerFromPoints(t.totalPoints);
+
+      const b = document.createElement('div');
+      b.className = 'tab' + (g === state.activeGame ? ' active' : '');
+      const base = document.createElement('div');
+      base.innerHTML = `<div><b>Game ${g+1}</b></div><div class="mini">${t.completedHoles}/${state.holes} holes</div>`;
+      b.appendChild(base);
+
+      if(t.complete){
+        const badge = document.createElement('span');
+        badge.className = 'badge win';
+        badge.textContent = w.isTie ? 'Tie' : `Winner: ${state.names[w.idxs[0]]}`;
+        b.appendChild(badge);
+      }
+
+      b.addEventListener('click', ()=>{ state.activeGame = g; saveState(); render(); });
+      tabs.appendChild(b);
+    }
+  }
+
+  function renderTotals(){
+    const g = state.activeGame;
+    const gt = gameTotals(g);
+    const ow = overallTotals();
+
+    const wrapG = el('totalsGame');
+    wrapG.innerHTML = '';
+    const gw = winnerFromPoints(gt.totalPoints);
+
+    for(let p=0;p<3;p++){
+      const div = document.createElement('div');
+      div.className = 'pill';
+      const isGameWinner = gt.complete && !gw.isTie && gw.idxs[0] === p;
+      const badge = isGameWinner ? `<span class="badge win">Winner</span>` : '';
+      div.innerHTML = `<b>${escapeHtml(state.names[p])}</b>: ${gt.totalPoints[p].toFixed(1)} pts, ${gt.totalStrokes[p]} strokes ${badge}`;
+      wrapG.appendChild(div);
+    }
+
+    const wrapO = el('totalsOverall');
+    wrapO.innerHTML = '';
+    const owinner = winnerFromPoints(ow.totalPoints);
+
+    for(let p=0;p<3;p++){
+      const div = document.createElement('div');
+      div.className = 'pill';
+      const isOverallWinner = ow.allComplete && !owinner.isTie && owinner.idxs[0] === p;
+      const trophy = isOverallWinner ? `<span class="badge trophy">\uD83C\uDFC6 Trophy</span>` : '';
+      div.innerHTML = `<b>${escapeHtml(state.names[p])}</b>: ${ow.totalPoints[p].toFixed(1)} pts, ${ow.totalStrokes[p]} strokes ${trophy}`;
+      wrapO.appendChild(div);
+    }
+
+    el('scorecardTitle').textContent = `Scorecard (Game ${g+1})`;
+  }
+
+  function lastCompletedHoleIndex(gameIdx){
+    let idx = -1;
+    for(let h=0; h<state.holes; h++) if(computeHolePoints(state.strokes[gameIdx][h])) idx = h;
+    return idx;
+  }
+
+  function addLeaderClass(td, yes){ if(yes) td.classList.add('leader'); }
+
+  function focusStroke(g, h, p){
+    const q = `input.strokeInput[data-game="${g}"][data-hole="${h}"][data-player="${p}"]`;
+    const node = document.querySelector(q);
+    if(node){ node.focus(); node.select?.(); }
+  }
+
+  function scheduleAdvance(g, h, p, valueSnapshot){
+    const key = `${g}-${h}-${p}`;
+    if(advanceTimers.has(key)) clearTimeout(advanceTimers.get(key));
+    const t = setTimeout(()=>{
+      const current = state.strokes[g]?.[h]?.[p];
+      if(current === null || Number.isNaN(current)) return;
+      if(String(current) !== String(valueSnapshot)) return;
+      let nh = h;
+      let np = p + 1;
+      if(np > 2){ np = 0; nh = Math.min(state.holes - 1, h + 1); }
+      focusStroke(g, nh, np);
+    }, 600);
+    advanceTimers.set(key, t);
+  }
+
+  function renderScorecard(){
+    const sc = el('scorecard');
+    sc.innerHTML = '';
+    const g = state.activeGame;
+    const latest = lastCompletedHoleIndex(g);
+
+    const cumStrokes = [0,0,0];
+    const cumPoints  = [0,0,0];
+
+    for(let h=0; h<state.holes; h++){
+      const st = state.strokes[g][h];
+      const holePts = computeHolePoints(st);
+      const complete = !!holePts;
+
+      const nextCumStrokes = [...cumStrokes];
+      const nextCumPoints  = [...cumPoints];
+      if(complete){
+        for(let p=0;p<3;p++){
+          nextCumStrokes[p] += Number(st[p]);
+          nextCumPoints[p]  += holePts[p];
+        }
+      }
+
+      const isLatest = (h === latest && complete);
+      let minStroke = null;
+      let maxPts = null;
+      if(isLatest){ minStroke = Math.min(...nextCumStrokes); maxPts = Math.max(...nextCumPoints); }
+
+      const holeCard = document.createElement('div');
+      holeCard.className = 'holeCard';
+
+      const top = document.createElement('div');
+      top.className = 'holeTop';
+      top.innerHTML = `<div class="holeTitle">Hole ${h+1}</div>` + (isLatest ? `<div class="latestTag">Latest scored hole</div>` : ``);
+      holeCard.appendChild(top);
+
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const hr = document.createElement('tr');
+      hr.innerHTML = `<th></th><th>${escapeHtml(state.names[0])}</th><th>${escapeHtml(state.names[1])}</th><th>${escapeHtml(state.names[2])}</th>`;
+      thead.appendChild(hr);
+      table.appendChild(thead);
+
+      const tbody = document.createElement('tbody');
+      const tr1 = document.createElement('tr');
+      const tdLabel1 = document.createElement('td');
+      tdLabel1.className = 'label';
+      tdLabel1.textContent = 'Strokes';
+      tr1.appendChild(tdLabel1);
+
+      for(let p=0;p<3;p++){
+        const td = document.createElement('td');
+        const inp = document.createElement('input');
+        inp.type = 'number';
+        inp.min = '1';
+        inp.step = '1';
+        inp.inputMode = 'numeric';
+        inp.className = 'strokeInput';
+        inp.dataset.game = String(g);
+        inp.dataset.hole = String(h);
+        inp.dataset.player = String(p);
+        inp.value = st[p] ?? '';
+        inp.setAttribute('aria-label', `Game ${g+1}, Hole ${h+1}, strokes ${state.names[p]}`);
+        inp.addEventListener('input', ()=>{
+          const v = inp.value === '' ? null : Number(inp.value);
+          state.strokes[g][h][p] = (v === null || Number.isNaN(v)) ? null : v;
+          saveState();
+          const snap = state.strokes[g][h][p];
+          render();
+          scheduleAdvance(g, h, p, snap);
+        });
+        td.appendChild(inp);
+        tr1.appendChild(td);
+      }
+      tbody.appendChild(tr1);
+
+      const tr2 = document.createElement('tr');
+      tr2.innerHTML = `<td class="label">Strokes total</td>`;
+      for(let p=0;p<3;p++){
+        const td = document.createElement('td');
+        td.className = 'num';
+        td.textContent = complete ? String(nextCumStrokes[p]) : '';
+        addLeaderClass(td, isLatest && complete && nextCumStrokes[p] === minStroke);
+        tr2.appendChild(td);
+      }
+      tbody.appendChild(tr2);
+
+      const tr3 = document.createElement('tr');
+      tr3.innerHTML = `<td class="label">Points (hole)</td>`;
+      for(let p=0;p<3;p++){
+        const td = document.createElement('td');
+        td.className = 'num';
+        td.textContent = holePts ? fmt(holePts[p]) : '';
+        tr3.appendChild(td);
+      }
+      tbody.appendChild(tr3);
+
+      const tr4 = document.createElement('tr');
+      tr4.innerHTML = `<td class="label">Points total</td>`;
+      for(let p=0;p<3;p++){
+        const td = document.createElement('td');
+        td.className = 'num';
+        td.textContent = complete ? fmt(nextCumPoints[p]) : '';
+        addLeaderClass(td, isLatest && complete && nextCumPoints[p] === maxPts);
+        tr4.appendChild(td);
+      }
+      tbody.appendChild(tr4);
+
+      table.appendChild(tbody);
+      holeCard.appendChild(table);
+      sc.appendChild(holeCard);
+
+      if(complete){
+        for(let p=0;p<3;p++) cumStrokes[p] = nextCumStrokes[p];
+        for(let p=0;p<3;p++) cumPoints[p]  = nextCumPoints[p];
+      }
+    }
+  }
+
+  function render(){
+    const active = document.activeElement;
+    const ag = active?.dataset?.game;
+    const ah = active?.dataset?.hole;
+    const ap = active?.dataset?.player;
+
+    renderTabs();
+    renderTotals();
+    renderScorecard();
+
+    if(ag !== undefined && ah !== undefined && ap !== undefined){
+      requestAnimationFrame(()=>focusStroke(Number(ag), Number(ah), Number(ap)));
+    }
+
+    maybeCelebrate();
+  }
+
+  function csvCell(v){
+    if(v === null || v === undefined) return '';
+    const s = String(v);
+    return /[\",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+
+  function buildCSVAll(){
+    const lines = [];
+    lines.push(["9 Points Golf","Multi-game export","v1"].map(csvCell).join(','));
+    lines.push(["Games", state.games, "Holes per game", state.holes].map(csvCell).join(','));
+    lines.push(["Names", state.names[0], state.names[1], state.names[2]].map(csvCell).join(','));
+    lines.push('');
+
+    for(let g=0; g<state.games; g++){
+      lines.push(["Game", g+1].map(csvCell).join(','));
+      lines.push(["Hole","Label", state.names[0], state.names[1], state.names[2]].map(csvCell).join(','));
+      const cumStrokes = [0,0,0];
+      const cumPoints  = [0,0,0];
+
+      for(let h=0; h<state.holes; h++){
+        const st = state.strokes[g][h];
+        const pts = computeHolePoints(st);
+        lines.push([h+1, "Strokes", st[0] ?? "", st[1] ?? "", st[2] ?? ""].map(csvCell).join(','));
+        if(pts){
+          for(let p=0;p<3;p++){ cumStrokes[p] += Number(st[p]); cumPoints[p] += pts[p]; }
+          lines.push([h+1, "Strokes total", cumStrokes[0], cumStrokes[1], cumStrokes[2]].map(csvCell).join(','));
+          lines.push([h+1, "Points (hole)", pts[0].toFixed(1), pts[1].toFixed(1), pts[2].toFixed(1)].map(csvCell).join(','));
+          lines.push([h+1, "Points total", cumPoints[0].toFixed(1), cumPoints[1].toFixed(1), cumPoints[2].toFixed(1)].map(csvCell).join(','));
+        } else {
+          lines.push([h+1, "Strokes total", "", "", ""].map(csvCell).join(','));
+          lines.push([h+1, "Points (hole)", "", "", ""].map(csvCell).join(','));
+          lines.push([h+1, "Points total", "", "", ""].map(csvCell).join(','));
+        }
+        lines.push('');
+      }
+
+      const gt = gameTotals(g);
+      lines.push(["Totals", "Strokes", gt.totalStrokes[0], gt.totalStrokes[1], gt.totalStrokes[2]].map(csvCell).join(','));
+      lines.push(["Totals", "Points", gt.totalPoints[0].toFixed(1), gt.totalPoints[1].toFixed(1), gt.totalPoints[2].toFixed(1)].map(csvCell).join(','));
+      const gw = winnerFromPoints(gt.totalPoints);
+      lines.push(["Winner", gw.isTie ? "Tie" : state.names[gw.idxs[0]]].map(csvCell).join(','));
+      lines.push('');
+      lines.push('');
+    }
+
+    const ot = overallTotals();
+    lines.push(["Overall totals"].map(csvCell).join(','));
+    lines.push(["Label", state.names[0], state.names[1], state.names[2]].map(csvCell).join(','));
+    lines.push(["Strokes", ot.totalStrokes[0], ot.totalStrokes[1], ot.totalStrokes[2]].map(csvCell).join(','));
+    lines.push(["Points", ot.totalPoints[0].toFixed(1), ot.totalPoints[1].toFixed(1), ot.totalPoints[2].toFixed(1)].map(csvCell).join(','));
+    const ow = winnerFromPoints(ot.totalPoints);
+    lines.push(["Overall winner", ow.isTie ? "Tie" : state.names[ow.idxs[0]]].map(csvCell).join(','));
+
+    return "\ufeff" + lines.join("\r\n");
+  }
+
+  function buildCSVGame(gameIdx){
+    const lines = [];
+    lines.push(["9 Points Golf","Single-game export","v1"].map(csvCell).join(','));
+    lines.push(["Game", gameIdx+1, "Holes", state.holes].map(csvCell).join(','));
+    lines.push(["Names", state.names[0], state.names[1], state.names[2]].map(csvCell).join(','));
+    lines.push('');
+
+    lines.push(["Hole","Label", state.names[0], state.names[1], state.names[2]].map(csvCell).join(','));
+    const cumStrokes = [0,0,0];
+    const cumPoints  = [0,0,0];
+
+    for(let h=0; h<state.holes; h++){
+      const st = state.strokes[gameIdx][h];
+      const pts = computeHolePoints(st);
+      lines.push([h+1, "Strokes", st[0] ?? "", st[1] ?? "", st[2] ?? ""].map(csvCell).join(','));
+      if(pts){
+        for(let p=0;p<3;p++){ cumStrokes[p] += Number(st[p]); cumPoints[p] += pts[p]; }
+        lines.push([h+1, "Strokes total", cumStrokes[0], cumStrokes[1], cumStrokes[2]].map(csvCell).join(','));
+        lines.push([h+1, "Points (hole)", pts[0].toFixed(1), pts[1].toFixed(1), pts[2].toFixed(1)].map(csvCell).join(','));
+        lines.push([h+1, "Points total", cumPoints[0].toFixed(1), cumPoints[1].toFixed(1), cumPoints[2].toFixed(1)].map(csvCell).join(','));
+      } else {
+        lines.push([h+1, "Strokes total", "", "", ""].map(csvCell).join(','));
+        lines.push([h+1, "Points (hole)", "", "", ""].map(csvCell).join(','));
+        lines.push([h+1, "Points total", "", "", ""].map(csvCell).join(','));
+      }
+      lines.push('');
+    }
+
+    const gt = gameTotals(gameIdx);
+    lines.push(["Totals", "Strokes", gt.totalStrokes[0], gt.totalStrokes[1], gt.totalStrokes[2]].map(csvCell).join(','));
+    lines.push(["Totals", "Points", gt.totalPoints[0].toFixed(1), gt.totalPoints[1].toFixed(1), gt.totalPoints[2].toFixed(1)].map(csvCell).join(','));
+    const gw = winnerFromPoints(gt.totalPoints);
+    lines.push(["Winner", gw.isTie ? "Tie" : state.names[gw.idxs[0]]].map(csvCell).join(','));
+
+    return "\ufeff" + lines.join("\r\n");
+  }
+
+  // Hosted-friendly download helper
+  function downloadTextFile(filename, text, mime){
+    const blob = new Blob([text], { type: mime || 'text/plain;charset=utf-8' });
+
+    if (window.navigator && window.navigator.msSaveOrOpenBlob) {
+      window.navigator.msSaveOrOpenBlob(blob, filename);
+      return;
+    }
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.rel = 'noopener';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+
+    const ua = navigator.userAgent || '';
+    const isIOS = /iPad|iPhone|iPod/.test(ua);
+    const isSafari = /^((?!chrome|android).)*safari/i.test(ua);
+    if(isIOS || isSafari){
+      setTimeout(() => { try { window.open(url, '_blank'); } catch (e) {} }, 50);
+    }
+
+    setTimeout(() => {
+      try { URL.revokeObjectURL(url); } catch (e) {}
+      try { a.remove(); } catch (e) {}
+    }, 4000);
+  }
+
+  // CSV import parsing
+  function stripBOM(s){ return s && s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s; }
+
+  function parseCSV(text){
+    text = stripBOM(String(text || ''));
+    const rows = [];
+    let row = [];
+    let cell = '';
+    let inQuotes = false;
+
+    for(let i=0; i<text.length; i++){
+      const ch = text[i];
+      if(inQuotes){
+        if(ch === '"'){
+          const next = text[i+1];
+          if(next === '"'){ cell += '"'; i++; }
+          else{ inQuotes = false; }
+        } else {
+          cell += ch;
+        }
+        continue;
+      }
+
+      if(ch === '"'){ inQuotes = true; continue; }
+      if(ch === ','){ row.push(cell); cell = ''; continue; }
+      if(ch === '\r'){
+        if(text[i+1] === '\n') i++;
+        row.push(cell); rows.push(row);
+        row = []; cell = '';
+        continue;
+      }
+      if(ch === '\n'){
+        row.push(cell); rows.push(row);
+        row = []; cell = '';
+        continue;
+      }
+      cell += ch;
+    }
+
+    row.push(cell);
+    rows.push(row);
+
+    while(rows.length && rows[rows.length-1].every(v => String(v || '').trim() === '')) rows.pop();
+    return rows;
+  }
+
+  function findRow(rows, firstCell){
+    const target = String(firstCell).toLowerCase();
+    for(let i=0; i<rows.length; i++){
+      if(!rows[i] || rows[i].length === 0) continue;
+      if(String(rows[i][0] || '').trim().toLowerCase() === target) return i;
+    }
+    return -1;
+  }
+
+  function toInt(v){
+    const n = Number(String(v || '').trim());
+    return Number.isFinite(n) ? Math.trunc(n) : null;
+  }
+
+  function parseNamesRow(rows){
+    const idx = findRow(rows, 'Names');
+    if(idx < 0) return null;
+    const r = rows[idx];
+    const n1 = (r[1] || '').trim();
+    const n2 = (r[2] || '').trim();
+    const n3 = (r[3] || '').trim();
+    if(!n1 && !n2 && !n3) return null;
+    return [n1 || DEFAULT_NAMES[0], n2 || DEFAULT_NAMES[1], n3 || DEFAULT_NAMES[2]];
+  }
+
+  function applyNamesIfProvided(names){
+    if(!names) return;
+    state.names = [
+      (String(names[0] || '').trim() || DEFAULT_NAMES[0]),
+      (String(names[1] || '').trim() || DEFAULT_NAMES[1]),
+      (String(names[2] || '').trim() || DEFAULT_NAMES[2])
+    ];
+    buildNames();
+  }
+
+  function importSingleGame(rows){
+    const kind = detectCSVType(rows);
+    if(kind !== 'game') throw new Error('Please select a single-game export CSV');
+
+    const gameRowIdx = findRow(rows, 'Game');
+    if(gameRowIdx < 0) throw new Error('Missing Game row');
+
+    const gr = rows[gameRowIdx];
+    const holesIdx = gr.findIndex(x => String(x || '').trim().toLowerCase() === 'holes');
+    const importedHoles = holesIdx >= 0 ? toInt(gr[holesIdx+1]) : null;
+
+    if(!importedHoles || importedHoles < 1 || importedHoles > 36) throw new Error('Invalid holes in CSV');
+
+    const newNames = parseNamesRow(rows);
+
+    if(importedHoles !== state.holes){
+      const msg = `CSV has ${importedHoles} holes. Current is ${state.holes}. Change holes to match CSV?`;
+      if(window.confirm(msg)) setGamesAndHoles(state.games, importedHoles);
+    }
+
+    applyNamesIfProvided(newNames);
+
+    const g = state.activeGame;
+    for(let h=0; h<state.holes; h++) state.strokes[g][h] = [null,null,null];
+
+    for(const r of rows){
+      if(!r || r.length < 2) continue;
+      const holeN = toInt(r[0]);
+      const label = String(r[1] || '').trim().toLowerCase();
+      if(!holeN || holeN < 1 || holeN > state.holes) continue;
+      if(label !== 'strokes') continue;
+
+      const s1 = r[2] === '' ? null : toInt(r[2]);
+      const s2 = r[3] === '' ? null : toInt(r[3]);
+      const s3 = r[4] === '' ? null : toInt(r[4]);
+      state.strokes[g][holeN-1] = [s1, s2, s3].map(v => (v === null || !Number.isFinite(v) ? null : v));
+    }
+
+    delete state.celebrated.games[String(g)];
+    state.celebrated.overall = false;
+
+    saveState();
+    render();
+
+    showToast('Import complete', `Imported data into Game ${g+1}`);
+  }
+
+  function importAllGames(rows){
+    const kind = detectCSVType(rows);
+    if(kind !== 'all') throw new Error('Please select an all-games export CSV');
+
+    const gamesRowIdx = findRow(rows, 'Games');
+    if(gamesRowIdx < 0) throw new Error('Missing Games row');
+
+    const r = rows[gamesRowIdx];
+    const importedGames = toInt(r[1]);
+    const holesIdx = r.findIndex(x => String(x || '').trim().toLowerCase() === 'holes per game');
+    const importedHoles = holesIdx >= 0 ? toInt(r[holesIdx+1]) : null;
+
+    if(!importedGames || importedGames < 1 || importedGames > 20) throw new Error('Invalid games in CSV');
+    if(!importedHoles || importedHoles < 1 || importedHoles > 36) throw new Error('Invalid holes in CSV');
+
+    const newNames = parseNamesRow(rows);
+
+    if(importedGames !== state.games || importedHoles !== state.holes){
+      const msg = `CSV has ${importedGames} games and ${importedHoles} holes per game. Current is ${state.games} games and ${state.holes} holes. Replace current setup?`;
+      if(!window.confirm(msg)) throw new Error('Import cancelled');
+      setGamesAndHoles(importedGames, importedHoles);
+    }
+
+    applyNamesIfProvided(newNames);
+
+    initStrokes();
+
+    let currentGame = null;
+    for(const row of rows){
+      if(!row || row.length === 0) continue;
+      const first = String(row[0] || '').trim().toLowerCase();
+      if(first === 'game'){
+        const gnum = toInt(row[1]);
+        currentGame = (gnum && gnum >= 1 && gnum <= state.games) ? (gnum - 1) : null;
+        continue;
+      }
+      if(currentGame === null) continue;
+
+      const holeN = toInt(row[0]);
+      const label = String(row[1] || '').trim().toLowerCase();
+      if(!holeN || holeN < 1 || holeN > state.holes) continue;
+      if(label !== 'strokes') continue;
+
+      const s1 = row[2] === '' ? null : toInt(row[2]);
+      const s2 = row[3] === '' ? null : toInt(row[3]);
+      const s3 = row[4] === '' ? null : toInt(row[4]);
+      state.strokes[currentGame][holeN-1] = [s1, s2, s3].map(v => (v === null || !Number.isFinite(v) ? null : v));
+    }
+
+    state.celebrated = { games: {}, overall: false };
+
+    saveState();
+    render();
+
+    showToast('Import complete', 'Imported all games');
+  }
+
+  function detectCSVType(rows){
+    if(!rows || rows.length === 0) return null;
+    const r0 = rows[0].map(v => String(v || '').trim().toLowerCase());
+    if(r0[0] === '9 points golf' && r0[1] === 'multi-game export') return 'all';
+    if(r0[0] === '9 points golf' && r0[1] === 'single-game export') return 'game';
+    return null;
+  }
+
+  function handleImportText(text){
+    const rows = parseCSV(text);
+    if(pendingImportMode === 'all') return importAllGames(rows);
+    if(pendingImportMode === 'game') return importSingleGame(rows);
+    throw new Error('Import mode not set');
+  }
+
+  // Buttons
+  el('apply').addEventListener('click', ()=>{
+    setGamesAndHoles(el('gameCount').value, el('holeCount').value);
+    el('gameCount').value = state.games;
+    el('holeCount').value = state.holes;
+    saveState();
+    render();
+  });
+
+  el('addGame').addEventListener('click', ()=>{
+    setGamesAndHoles(state.games + 1, state.holes);
+    el('gameCount').value = state.games;
+    saveState();
+    render();
+  });
+
+  el('addHole').addEventListener('click', ()=>{
+    setGamesAndHoles(state.games, state.holes + 1);
+    el('holeCount').value = state.holes;
+    saveState();
+    render();
+  });
+
+  el('resetGame').addEventListener('click', ()=>{
+    const g = state.activeGame;
+    for(let h=0; h<state.holes; h++) state.strokes[g][h] = [null,null,null];
+    delete state.celebrated.games[String(g)];
+    state.celebrated.overall = false;
+    saveState();
+    render();
+  });
+
+  el('resetAll').addEventListener('click', ()=>{
+    initStrokes();
+    state.names = [...DEFAULT_NAMES];
+    state.celebrated = { games: {}, overall: false };
+    saveState();
+    buildNames();
+    render();
+  });
+
+  el('exportGame').addEventListener('click', ()=>{
+    const csvText = buildCSVGame(state.activeGame);
+    downloadTextFile(`9points_game_${state.activeGame+1}.csv`, csvText, 'text/csv;charset=utf-8');
+  });
+
+  el('exportAll').addEventListener('click', ()=>{
+    const csvText = buildCSVAll();
+    downloadTextFile('9points_all_games.csv', csvText, 'text/csv;charset=utf-8');
+  });
+
+  function openImport(mode){
+    pendingImportMode = mode;
+    const f = el('importFile');
+    f.value = '';
+    f.click();
+  }
+
+  el('importGame').addEventListener('click', ()=> openImport('game'));
+  el('importAll').addEventListener('click', ()=> openImport('all'));
+
+  el('importFile').addEventListener('change', async (ev)=>{
+    const file = ev.target.files && ev.target.files[0];
+    if(!file) return;
+    try{
+      const text = await file.text();
+      handleImportText(text);
+    } catch(err){
+      showToast('Import failed', String(err && err.message ? err.message : err));
+    } finally {
+      pendingImportMode = null;
+      ev.target.value = '';
+    }
+  });
+
+  el('toastClose').addEventListener('click', hideToast);
+
+  // Init clean
+  const loaded = loadState();
+  if(!loaded){
+    initStrokes();
+    saveState();
+  }
+  el('gameCount').value = state.games;
+  el('holeCount').value = state.holes;
+  buildNames();
+  render();
+</script>
+</body>
+</html>
+    .win{ color:#0b1220; background:var(--yellow); border-color:rgba(251,191,36,.75); font-weight:800; }
+    .trophy{ color:#0b1220; background:linear-gradient(135deg, #fbbf24, #f59e0b); border-color:rgba(251,191,36,.85); font-weight:900; }
+
+    .strokeInput{ background:#142243; border-color:rgba(94,234,212,.30); box-shadow: inset 0 0 0 1px rgba(0,0,0,.15); }
+    .strokeInput:focus{ outline:none; border-color:rgba(94,234,212,.75); box-shadow: 0 0 0 3px rgba(94,234,212,.18); }
+
+    .holes{ display:flex; flex-direction:column; gap:10px; }
+    .holeCard{ background:var(--dark); border:1px solid var(--line); border-radius:12px; padding:10px; }
+    .holeTop{ display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+    .holeTitle{ font-weight:700; font-size:13px; }
+    .latestTag{ font-size:11px; color:var(--muted); border:1px solid rgba(251,191,36,.45); padding:2px 8px; border-radius:999px; }
+
+    table{ width:100%; border-collapse:separate; border-spacing:0; }
+    th, td{ border-bottom:1px solid rgba(34,50,85,.65); padding:8px 6px; font-size:13px; text-align:center; }
+    th{ color:var(--muted); font-weight:600; }
+    td.label{ text-align:left; color:var(--muted); width:140px; }
+    tr:last-child td{ border-bottom:0; }
+
+    .num{ font-variant-numeric: tabular-nums; }
 
     .leader{ background:var(--yellow); color:#0b1220; font-weight:800; border-radius:8px; }
 
